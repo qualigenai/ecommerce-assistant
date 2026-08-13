@@ -1,0 +1,4 @@
+
+.idea/
+backend/*.db
+backend/*.db.backup

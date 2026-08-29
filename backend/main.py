@@ -6,6 +6,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from qdrant_client import QdrantClient
 from sqlalchemy.orm import Session
 
+import agent
 import crud
 import embeddings
 import routing
@@ -216,48 +217,120 @@ def assistant_search(q: str, db: Session = Depends(get_db)):
     }
 
 
+# ---------- Conversational agent (Day 7) ----------
+
+@app.post("/chat")
+def chat(message: str, db: Session = Depends(get_db)):
+    """
+    Single-turn conversational endpoint. This is deliberately separate
+    from /assistant/search for now — Day 7's target is a working,
+    tool-grounded agent in isolation before it's wired into the routing
+    heuristic's AI path on a later day.
+    """
+    with telemetry.timed() as elapsed:
+        try:
+            result = agent.run_agent(message, db)
+            success, error = True, None
+            # BUG-008 fix (part C) — see docs/bug-log.md. An empty reply
+            # with no exception raised was previously logged as
+            # success=True — the "success" flag only ever tracked
+            # exceptions, not a functionally blank response. A blank
+            # reply is a real failure from the customer's perspective,
+            # even though the code path completed without erroring.
+            if not result.get("reply", "").strip():
+                success, error = False, "Agent produced an empty reply"
+        except Exception as e:
+            result = {"reply": "", "tool_calls": []}
+            success, error = False, str(e)
+
+    latency = elapsed()
+    # BUG-002 fix — see docs/bug-log.md. result_count previously logged
+    # len(result["tool_calls"]) instead of actual products found.
+    total_results = sum(tc.get("result_count", 0) for tc in result["tool_calls"])
+    telemetry.log_query(
+        db, query_text=message, path="chat", latency_ms=latency,
+        result_count=total_results,
+        reason=f"{len(result['tool_calls'])} tool call(s) made" if result["tool_calls"] else "No tool called",
+        success=success, error=error,
+    )
+
+    return {
+        "message": message,
+        "reply": result["reply"],
+        "tool_calls": result["tool_calls"],
+        "latency_ms": round(latency, 1),
+    }
+
+
 # ---------- Recommendations (Day 5) ----------
 
 @app.get("/products/{product_id}/recommendations")
 def get_recommendations(product_id: int, limit: int = 5, db: Session = Depends(get_db)):
-    """Embedding-similarity 'related products' for a product detail page.
-    Reuses the same Qdrant index built by /reindex on Day 4."""
+    """
+    TRUST PRINCIPLE: Governance
+
+    Business Purpose:
+        Always return something useful for a valid product, and be honest
+        about which strategy produced the results.
+
+    Design Decision:
+        Three distinguishable outcomes, not two:
+        1. Embedding similarity (product is indexed) — strategy="embedding"
+        2. Rules-based fallback (product exists, not yet indexed) — strategy="fallback"
+        3. Genuine 404 (product doesn't exist in the catalog at all)
+
+        Day 5 only had outcomes 1 and 3, which meant a perfectly valid new
+        product with no index entry yet looked identical to a typo'd
+        product ID. Day 6 closes that gap.
+
+    Failure Strategy:
+        Every response — including fallback — states its own strategy and
+        reason, so a caller never has to guess which code path answered.
+
+    Future Validation:
+        Track the ratio of embedding vs. fallback responses over time —
+        a rising fallback rate signals /reindex is falling behind the
+        catalog and should run more often.
+    """
     with telemetry.timed() as elapsed:
         similar = vector_store.recommend_similar(product_id, limit=limit)
-        if similar is None:
-            latency = elapsed()
-            # GOVERNANCE PRINCIPLE:
-            # The missing-index (cold-start) case is logged as an explicit
-            # failure, not silently swallowed into an empty success
-            # response. A 0-result success and a "not indexed" failure
-            # look identical to a customer but mean very different things
-            # to an engineer investigating the log later — this keeps them
-            # distinguishable.
-            telemetry.log_query(
-                db, query_text=f"recommend:{product_id}", path="recommend",
-                latency_ms=latency, result_count=0, success=False,
-                error="Product not indexed in Qdrant — run /reindex, or this is a cold-start case for Day 6.",
+
+        if similar is not None:
+            payload = [r.payload for r in similar]
+            strategy = "embedding"
+            reason = "Embedding similarity against the Day 4 vector index."
+        else:
+            product = crud.get_product(db, product_id)
+            if product is None:
+                latency = elapsed()
+                telemetry.log_query(
+                    db, query_text=f"recommend:{product_id}", path="recommend",
+                    latency_ms=latency, result_count=0, success=False,
+                    error="Product does not exist in the catalog.",
+                )
+                raise HTTPException(status_code=404, detail="Product not found in catalog.")
+
+            fallback = crud.get_fallback_recommendations(db, product, limit=limit)
+            payload = [schemas.ProductOut.model_validate(p).model_dump() for p in fallback]
+            strategy = "fallback"
+            reason = (
+                f"Cold-start: product not yet indexed in Qdrant. Used category+price "
+                f"fallback (category='{product.category}')."
             )
-            raise HTTPException(
-                status_code=404,
-                detail="Product not indexed for recommendations yet. Run /reindex, "
-                       "or this is a cold-start product (Day 6 will add a fallback).",
-            )
-        payload = [r.payload for r in similar]
+
         latency = elapsed()
 
-    # OBSERVABILITY PRINCIPLE:
-    # Every recommendation request is logged with latency, result count,
-    # and success/failure status.
-    #
-    # This creates an audit trail that allows engineers to investigate
-    # failures, monitor performance trends, and validate recommendation
-    # quality over time.
     telemetry.log_query(
         db, query_text=f"recommend:{product_id}", path="recommend",
-        latency_ms=latency, result_count=len(payload), success=True,
+        latency_ms=latency, result_count=len(payload), reason=reason, success=True,
     )
-    return {"product_id": product_id, "latency_ms": round(latency, 1), "recommendations": payload}
+    return {
+        "product_id": product_id,
+        "strategy": strategy,
+        "reason": reason,
+        "latency_ms": round(latency, 1),
+        "recommendations": payload,
+    }
 
 
 # ---------- Observability (Day 4) ----------

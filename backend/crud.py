@@ -73,3 +73,44 @@ def search_products(
         results = [p for p in results if p.attributes.get("waterproof") == waterproof]
 
     return results
+
+
+def get_fallback_recommendations(db: Session, product: models.Product, limit: int = 5):
+    """
+    TRUST PRINCIPLE: Reliability
+
+    Business Purpose:
+        Ensure a product detail page always has something useful to show,
+        even for a brand-new product that hasn't been through /reindex yet
+        (the cold-start case).
+
+    Design Decision:
+        Rules-based fallback: same category, ordered by closeness in price
+        to the source product. No AI or embeddings involved — this path
+        exists specifically for when the embedding path isn't available.
+
+    Benefits:
+        - Zero dependency on the vector index being current
+        - Deterministic and instantly explainable ("same category, similar
+          price") — no similarity score to justify
+        - Near-zero cost, same as the Day 3 structured filter path
+
+    Failure Strategy:
+        Returns an empty list (not an error) when no other products exist
+        in the same category — a genuinely correct answer, not a failure.
+        The caller (main.py) is responsible for distinguishing "product
+        doesn't exist at all" from "product exists but has no fallback
+        candidates" before calling this function.
+
+    Future Validation:
+        Compare fallback-driven conversion rate against embedding-driven
+        conversion rate — if fallback consistently underperforms, that's
+        a signal to re-index more frequently rather than change this logic.
+    """
+    candidates = (
+        db.query(models.Product)
+        .filter(models.Product.category == product.category, models.Product.id != product.id)
+        .all()
+    )
+    candidates.sort(key=lambda p: abs(p.price - product.price))
+    return candidates[:limit]

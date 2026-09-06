@@ -7,6 +7,7 @@ from qdrant_client import QdrantClient
 from sqlalchemy.orm import Session
 
 import agent
+import conversation
 import crud
 import embeddings
 import routing
@@ -220,16 +221,21 @@ def assistant_search(q: str, db: Session = Depends(get_db)):
 # ---------- Conversational agent (Day 7) ----------
 
 @app.post("/chat")
-def chat(message: str, db: Session = Depends(get_db)):
+def chat(message: str, session_id: Optional[str] = None, db: Session = Depends(get_db)):
     """
-    Single-turn conversational endpoint. This is deliberately separate
-    from /assistant/search for now — Day 7's target is a working,
-    tool-grounded agent in isolation before it's wired into the routing
-    heuristic's AI path on a later day.
+    Conversational endpoint. Day 9: accepts an optional session_id to
+    carry conversation history across turns — see conversation.py and
+    agent.py's run_agent() for the trust rationale. If no session_id is
+    given, one is generated and returned; pass it back on the next call
+    to continue the same conversation (e.g. "find X" then, separately,
+    "add 1 to my cart").
     """
+    if not session_id:
+        session_id = conversation.new_session_id()
+
     with telemetry.timed() as elapsed:
         try:
-            result = agent.run_agent(message, db)
+            result = agent.run_agent(message, db, session_id=session_id)
             success, error = True, None
             # BUG-008 fix (part C) — see docs/bug-log.md. An empty reply
             # with no exception raised was previously logged as
@@ -240,7 +246,46 @@ def chat(message: str, db: Session = Depends(get_db)):
             if not result.get("reply", "").strip():
                 success, error = False, "Agent produced an empty reply"
         except Exception as e:
-            result = {"reply": "", "tool_calls": []}
+            # BUG-012 fix — see docs/bug-log.md.
+            #
+            # TRUST PRINCIPLE: Reliability
+            #
+            # Business Purpose:
+            #     Close the gap BUG-008 left open — a timed-out or failed
+            #     request must never reach the customer as a blank string,
+            #     the same guarantee BUG-008 already made for the
+            #     "model responded with empty content" case.
+            #
+            # Design Decision:
+            #     This except block previously returned {"reply": ""} on
+            #     ANY exception, including an Ollama request timing out
+            #     (httpx's 60s timeout in _call_ollama). That exception
+            #     propagates from OUTSIDE run_agent()'s loop, so BUG-008's
+            #     internal safe-fallback never runs — two different code
+            #     paths existed for "the agent didn't produce a real
+            #     answer," and only one of them was ever fixed.
+            #
+            # Benefits:
+            #     - A single, consistent reliability contract: no
+            #       customer-facing path can return a blank reply, whether
+            #       the failure is inside the model's response or in the
+            #       request to reach it at all.
+            #
+            # Failure Strategy:
+            #     Deliberately does NOT attempt to fix the underlying
+            #     latency (BUG-004, still open) — this only ensures that
+            #     when a timeout does occur, the customer gets a truthful
+            #     message instead of silence.
+            #
+            # Future Validation:
+            #     Track how often this exception path fires vs. BUG-008's
+            #     internal one — a high rate here specifically implicates
+            #     latency/timeout as the dominant failure mode, not model
+            #     response quality.
+            result = {
+                "reply": "I'm sorry, but I couldn't complete that request right now. Please try again.",
+                "tool_calls": [],
+            }
             success, error = False, str(e)
 
     latency = elapsed()
@@ -256,6 +301,7 @@ def chat(message: str, db: Session = Depends(get_db)):
 
     return {
         "message": message,
+        "session_id": session_id,
         "reply": result["reply"],
         "tool_calls": result["tool_calls"],
         "latency_ms": round(latency, 1),

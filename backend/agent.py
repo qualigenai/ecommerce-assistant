@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 import httpx
 from sqlalchemy.orm import Session
 
+import conversation
 import crud
 import embeddings
 import models
@@ -295,48 +296,6 @@ _MOCK_ORDERS = {
 }
 
 
-# BUG-009 fix — see docs/bug-log.md.
-#
-# TRUST PRINCIPLE: Reliability
-#
-# Business Purpose:
-#     Make search_products behave correctly when the model sends a real
-#     query alongside placeholder or partial filter values, instead of
-#     letting a stray 0 or "" silently override a perfectly good query.
-#
-# Design Decision:
-#     Two-part fix, not one:
-#     1. Normalize placeholder values BEFORE deciding anything: empty
-#        string category becomes None, non-positive price bounds become
-#        None (no product in this catalog costs $0 or less, so a price
-#        bound of exactly 0 is never a meaningful constraint — it's the
-#        model filling in a blank, not a real customer request).
-#     2. Define the routing contract explicitly, since normalization alone
-#        doesn't answer "what if a real filter AND a real query are both
-#        present at once": if query is present, semantic search runs
-#        first and any remaining real filters are applied as a POST-filter
-#        on top of it — combining relevance with precision — rather than
-#        the old either/or split where any non-None filter silently
-#        discarded the query entirely.
-#
-# Benefits:
-#     - Closes the exact failure: query="Trailhead Waterproof Hiking Boot"
-#       + waterproof=true (a real, legitimate filter here) now correctly
-#       finds the product, instead of price_lt=0/price_gt=0 placeholders
-#       forcing an impossible structured-only search
-#     - Generalizes correctly: a genuinely combined request like "show me
-#       waterproof jackets under $150" (real category + real price + real
-#       intent) now also benefits from semantic relevance ranking, not
-#       just blunt SQL filtering
-#
-# Failure Strategy:
-#     If query and every filter normalize away to nothing, returns an
-#     honest empty result rather than guessing.
-#
-# Future Validation:
-#     Compare result relevance between the old filter-only path and this
-#     hybrid path on the same queries — the hybrid path should never be
-#     worse, since it's a strict narrowing of already-relevant results.
 # BUG-010 fix — see docs/bug-log.md.
 #
 # TRUST PRINCIPLE: Reliability
@@ -712,10 +671,61 @@ def _finalize_reply(reply: str, trace: List[Dict[str, Any]]) -> str:
     return reply
 
 
-def run_agent(user_message: str, db: Session) -> Dict[str, Any]:
+# BUG-013 fix — see docs/bug-log.md.
+#
+# TRUST PRINCIPLE: Reliability
+#
+# Business Purpose:
+#     Never let raw, malformed pseudo-tool-call JSON reach the customer
+#     as if it were a real answer.
+#
+# Design Decision:
+#     Reuses BUG-008's exact nudge-and-continue mechanism rather than
+#     introducing new architecture. Content that looks like an attempted
+#     tool call (starts with '{', mentions "name" and "parameters"/
+#     "arguments") is treated the same way as empty content was already
+#     treated — not a valid final answer, so nudge and retry within the
+#     existing bounded loop.
+#
+# Benefits:
+#     - Closes a real, observed failure: the model sometimes writes out
+#       a tool call as text (often malformed JSON — missing a colon
+#       after "parameters", for example) instead of issuing a genuine
+#       tool call. Previously this passed every check ("content is
+#       non-empty") and went straight to the customer.
+#     - Deliberately narrow heuristic — requires the JSON-object shape
+#       AND both "name" and a parameters/arguments key, to avoid
+#       false-positiving on a legitimate answer that happens to mention
+#       JSON or start with a brace for unrelated reasons.
+#
+# Failure Strategy:
+#     If the model keeps producing this pattern every round, the
+#     existing MAX_TOOL_ITERATIONS cap and BUG-008 hard fallback still
+#     guarantee the turn terminates with an honest message, never a
+#     leaked JSON blob.
+#
+# Future Validation:
+#     Track how often this specific path fires — a high rate would be
+#     evidence the model needs a stronger structured-output constraint,
+#     not just this containment layer.
+def _looks_like_tool_call_json(content: str) -> bool:
+    stripped = content.strip()
+    if not stripped.startswith("{"):
+        return False
+    lowered = stripped.lower()
+    return '"name"' in lowered and ("parameters" in lowered or "arguments" in lowered)
+
+
+def run_agent(user_message: str, db: Session, session_id: str = None) -> Dict[str, Any]:
     """
     Multi-round agent: the model can chain multiple tool calls within one
     customer turn (e.g. search_products -> add_to_cart), not just one.
+
+    Day 9: also carries conversation history across turns when a
+    session_id is provided — see conversation.py for the full trust
+    rationale. This is the deterministic-fallback resolution path
+    BUG-007 concluded was the right answer, rather than continuing to
+    demand perfect single-turn tool chaining from a 3B model.
 
     TRUST PRINCIPLE: Observability
     Every tool call across every round is captured in `trace` and
@@ -724,10 +734,14 @@ def run_agent(user_message: str, db: Session) -> Dict[str, Any]:
     searched, what came back, and whether each step succeeded — not just
     the final text.
     """
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+    history = conversation.get_history(session_id) if session_id else []
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [
         {"role": "user", "content": user_message},
     ]
+
+    def _save(reply: str):
+        if session_id:
+            conversation.set_history(session_id, messages[1:] + [{"role": "assistant", "content": reply}])
 
     trace = []
     for round_num in range(1, MAX_TOOL_ITERATIONS + 1):
@@ -754,11 +768,13 @@ def run_agent(user_message: str, db: Session) -> Dict[str, Any]:
         )
 
         if not tool_calls:
-            if content:
+            if content and not _looks_like_tool_call_json(content):
                 # Model has what it needs and is ready to answer in plain text.
-                return {"reply": _finalize_reply(content, trace), "tool_calls": trace}
+                final_reply = _finalize_reply(content, trace)
+                _save(final_reply)
+                return {"reply": final_reply, "tool_calls": trace}
 
-            # BUG-008 fix — see docs/bug-log.md.
+            # BUG-008 fix, extended by BUG-013 — see docs/bug-log.md.
             #
             # TRUST PRINCIPLE: Reliability
             #
@@ -793,9 +809,11 @@ def run_agent(user_message: str, db: Session) -> Dict[str, Any]:
             messages.append({
                 "role": "user",
                 "content": (
-                    "You didn't call a tool or provide an answer. Please "
-                    "either call the appropriate tool to look up real "
-                    "information, or give the customer a plain-text answer."
+                    "You didn't call a tool or provide an answer — or you "
+                    "wrote out a tool call as text instead of actually "
+                    "calling it. Please either use the actual tool-calling "
+                    "mechanism to call a tool, or give the customer a "
+                    "plain-text answer. Do not write JSON in your reply."
                 ),
             })
             continue
@@ -824,16 +842,17 @@ def run_agent(user_message: str, db: Session) -> Dict[str, Any]:
     # always terminates.
     final = _call_ollama(messages, use_tools=False)
     final_content = (final["message"].get("content") or "").strip()
-    if final_content:
-        return {"reply": _finalize_reply(final_content, trace), "tool_calls": trace}
+    if final_content and not _looks_like_tool_call_json(final_content):
+        final_reply = _finalize_reply(final_content, trace)
+        _save(final_reply)
+        return {"reply": final_reply, "tool_calls": trace}
 
-    # BUG-008 hard fallback: even the forced final answer came back empty.
-    # An honest, fixed message is the floor — a blank string must never be
-    # what a customer sees.
-    return {
-        "reply": (
-            "I wasn't able to process that request. Could you try "
-            "rephrasing it, or asking in two separate steps?"
-        ),
-        "tool_calls": trace,
-    }
+    # BUG-008 hard fallback (also covers BUG-013's malformed-JSON case
+    # reaching this point): an honest, fixed message is the floor — a
+    # blank string, or a raw JSON blob, must never be what a customer sees.
+    fallback_reply = (
+        "I wasn't able to process that request. Could you try "
+        "rephrasing it, or asking in two separate steps?"
+    )
+    _save(fallback_reply)
+    return {"reply": fallback_reply, "tool_calls": trace}

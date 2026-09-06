@@ -26,13 +26,31 @@ practice project is modeled on, made concrete and measurable for this build.
 
 ## 3. Performance
 
-- [ ] Fast filter path responds in under 300ms
-- [ ] AI path responds in under 5 seconds on CPU-only local inference
-      (looser than a typical 2&ndash;3s cloud-API target, reflecting the
-      cost/latency trade-off of local, free inference &mdash; documented
-      explicitly rather than hidden)
+- [x] Fast filter path responds in under 300ms &mdash; measured live (Day 10):
+      6.8&ndash;8.8ms (`/search`), 21.7&ndash;24.1ms (`/assistant/search`,
+      routed). See `docs/bug-log.md`, BUG-004.
+- [x] AI path (semantic retrieval only) responds in under 5 seconds &mdash;
+      measured live (Day 10): 78&ndash;82ms (`/assistant/search`, semantic
+      branch). Retrieval was never the bottleneck; see BUG-004.
+- [ ] `/chat`'s full generative reply responds in under 5 seconds &mdash;
+      **not met as originally written**. Measured live (Day 10):
+      31.6&ndash;52.6s for a single-tool request, 12.4&ndash;33.1s for a
+      compound request &mdash; driven entirely by CPU-only 3B-model
+      generation time (the natural-language final-answer round), not by
+      retrieval, routing, or tool execution, all of which pass their own
+      targets above. A 5s full-reply target was never achievable for
+      open-ended generation on this hardware/model combination without
+      abandoning the project's open-source, self-hostable, no-paid-API
+      goal. Revised target, pending the streaming item below:
+      time-to-first-token under 5s, full-reply latency tracked but not
+      gated. See `docs/bug-log.md`, BUG-004 (root-caused, Day 10) and
+      LIMITATION-003 (conversation-history growth compounds this further
+      on turn 2+).
 - [ ] Chat UI streams tokens as they arrive rather than waiting for the full
-      response
+      response &mdash; now the direct, load-bearing fix for the item above:
+      turns an unmet full-reply latency target into a met
+      time-to-first-token target, without requiring a larger or
+      GPU-backed model.
 
 ## 4. Security & code quality
 

@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from typing import Any, Dict, List
 
 import httpx
@@ -743,9 +744,45 @@ def run_agent(user_message: str, db: Session, session_id: str = None) -> Dict[st
         if session_id:
             conversation.set_history(session_id, messages[1:] + [{"role": "assistant", "content": reply}])
 
+    # Day 10 (BUG-004 investigation) — see docs/bug-log.md.
+    #
+    # TRUST PRINCIPLE: Observability
+    #
+    # Business Purpose:
+    #     BUG-004's latency numbers (8.1s, 26.8s, 128.4s) were never
+    #     broken down by round or by model-vs-tool time, so there was no
+    #     way to tell whether a slow request meant "many rounds," "one
+    #     very slow inference call," or "cold-start" — the note next to
+    #     the 128.4s figure explicitly says this was never confirmed.
+    #
+    # Design Decision:
+    #     Time every model call and every tool execution individually,
+    #     and return the breakdown alongside the existing reply/trace
+    #     rather than only the one aggregate number /chat already logs.
+    #
+    # Benefits:
+    #     - A single request now shows exactly how many inference passes
+    #       it cost and how long each one took, real evidence instead of
+    #       a guess about cold-start vs genuine multi-round cost
+    #
+    # Failure Strategy:
+    #     Purely additive — reply/tool_calls keep their existing shape,
+    #     nothing downstream breaks if it ignores the new keys.
+    def _package(reply: str, trace: List[Dict[str, Any]], rounds: int, model_latency_ms: List[float]) -> Dict[str, Any]:
+        return {
+            "reply": reply,
+            "tool_calls": trace,
+            "rounds": rounds,
+            "model_latency_ms": [round(ms, 1) for ms in model_latency_ms],
+            "total_model_latency_ms": round(sum(model_latency_ms), 1),
+        }
+
     trace = []
+    model_latencies: List[float] = []
     for round_num in range(1, MAX_TOOL_ITERATIONS + 1):
+        _t0 = time.monotonic()
         response = _call_ollama(messages, use_tools=True)
+        model_latencies.append((time.monotonic() - _t0) * 1000)
         msg = response["message"]
         tool_calls = msg.get("tool_calls") or []
         content = (msg.get("content") or "").strip()
@@ -772,7 +809,7 @@ def run_agent(user_message: str, db: Session, session_id: str = None) -> Dict[st
                 # Model has what it needs and is ready to answer in plain text.
                 final_reply = _finalize_reply(content, trace)
                 _save(final_reply)
-                return {"reply": final_reply, "tool_calls": trace}
+                return _package(final_reply, trace, round_num, model_latencies)
 
             # BUG-008 fix, extended by BUG-013 — see docs/bug-log.md.
             #
@@ -822,11 +859,14 @@ def run_agent(user_message: str, db: Session, session_id: str = None) -> Dict[st
         for tc in tool_calls:
             name = tc["function"]["name"]
             arguments = tc["function"]["arguments"]
+            _tool_t0 = time.monotonic()
             result = _execute_tool(name, arguments, db)
+            tool_latency_ms = (time.monotonic() - _tool_t0) * 1000
             print(
                 f"[AGENT DEBUG] round={round_num} executed tool={name} "
                 f"args={arguments} success={result['success']} "
-                f"result_count={len(result['results'])} error={result['error']!r}",
+                f"result_count={len(result['results'])} error={result['error']!r} "
+                f"latency_ms={tool_latency_ms:.1f}",
                 flush=True,
             )
             trace.append({
@@ -834,18 +874,21 @@ def run_agent(user_message: str, db: Session, session_id: str = None) -> Dict[st
                 "success": result["success"],
                 "result_count": len(result["results"]),
                 "error": result["error"],
+                "latency_ms": round(tool_latency_ms, 1),
             })
             messages.append({"role": "tool", "content": json.dumps(result)})
 
     # Hit the iteration cap while the model still wanted to call tools (or
     # kept returning nothing) — force a final plain-text answer so the turn
     # always terminates.
+    _final_t0 = time.monotonic()
     final = _call_ollama(messages, use_tools=False)
+    model_latencies.append((time.monotonic() - _final_t0) * 1000)
     final_content = (final["message"].get("content") or "").strip()
     if final_content and not _looks_like_tool_call_json(final_content):
         final_reply = _finalize_reply(final_content, trace)
         _save(final_reply)
-        return {"reply": final_reply, "tool_calls": trace}
+        return _package(final_reply, trace, MAX_TOOL_ITERATIONS, model_latencies)
 
     # BUG-008 hard fallback (also covers BUG-013's malformed-JSON case
     # reaching this point): an honest, fixed message is the floor — a
@@ -855,4 +898,4 @@ def run_agent(user_message: str, db: Session, session_id: str = None) -> Dict[st
         "rephrasing it, or asking in two separate steps?"
     )
     _save(fallback_reply)
-    return {"reply": fallback_reply, "tool_calls": trace}
+    return _package(fallback_reply, trace, MAX_TOOL_ITERATIONS, model_latencies)

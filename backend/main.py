@@ -305,6 +305,14 @@ def chat(message: str, session_id: Optional[str] = None, db: Session = Depends(g
         "reply": result["reply"],
         "tool_calls": result["tool_calls"],
         "latency_ms": round(latency, 1),
+        # Day 10 (BUG-004 investigation) — see docs/bug-log.md. Purely
+        # additive: breaks down the single latency_ms figure above into
+        # how many model inference rounds this request actually took and
+        # how long each one took, so a slow request can be diagnosed
+        # instead of guessed at. .get() guards against any older cached
+        # agent module during a rolling restart.
+        "rounds": result.get("rounds"),
+        "model_latency_ms": result.get("model_latency_ms"),
     }
 
 

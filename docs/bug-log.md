@@ -123,6 +123,21 @@ full context is one lookup away instead of restated inline everywhere.
 - **Verified**: Unit-tested `order_status` on an unknown ID and `add_to_cart` on insufficient stock — both confirmed `results: []` on failure. Full Day 6 regression suite (4 tests) still passes after the rewrite.
 - **Status**: Fixed and verified in isolation. Pending live re-test.
 
+## BUG-013 — Model writes a tool call out as literal text instead of issuing a real one
+
+- **Found**: Day 9, live testing of `/chat` (category-browse and compound "find + add" requests)
+- **Severity**: High — a new, third failure shape distinct from anything previously catalogued: the model produces a JSON-shaped blob describing a tool call, but never calls the tool, and that blob reaches the customer verbatim as if it were the answer
+- **Component**: `agent.py`, `run_agent()`'s loop-exit condition — the same "no tool_calls" branch BUG-008 already hardens, but against a different symptom
+- **Symptom**: `tool_calls: []` with non-empty `content` shaped like `{"name":"search_products","parameters{"category":"","query":"Trailhead Waterproof Hiking Boot","waterproof":null}}` — note the malformed JSON (missing colon after `"parameters"`). Prior code treated any non-empty `content` with empty `tool_calls` as "the model has a final answer" and returned it straight to the customer.
+- **Root cause**: Ollama's tool-calling parser didn't recognize the model's output as a real tool call, so it fell through as plain chat content. The existing empty-content check (BUG-008) only catches a *blank* reply — it has no way to recognize a *non-blank* reply that is actually a broken tool-call attempt, not a real answer.
+- **Distinction from prior bugs**:
+  - BUG-008 = model returns nothing at all (empty content, empty tool_calls)
+  - BUG-011 = model fabricates a success claim in natural language
+  - BUG-013 = model produces a garbled JSON blob that isn't natural language at all, and it reaches the customer unmodified — a real UX/trust problem in its own right (unprofessional at best, a minor internal-schema information leak at worst)
+- **Fix**: Added `_looks_like_tool_call_json()` — a narrow heuristic requiring the content to start with `{` AND mention both `"name"` and a `parameters`/`arguments` key, to avoid false-positiving on a legitimate answer that happens to start with a brace or mention those words in prose. Reuses BUG-008's exact nudge-and-continue mechanism rather than introducing new architecture: content matching this shape is treated the same as empty content was already treated — not a valid final answer, so nudge once and retry within the existing bounded loop (`MAX_TOOL_ITERATIONS`). Applied at both checkpoints in `run_agent()` — the per-round completion check and the forced-final-answer path after the iteration cap — so the same leak can't occur at either exit point.
+- **Verified**: Detector tested against the exact malformed example from the live log (missing colon and all) plus a well-formed `"arguments"`-keyed variant — both correctly caught; three legitimate replies (a normal offer, a reply starting with an unrelated brace, a reply that mentions "name" and "parameters" conversationally without being JSON-shaped) confirmed no false positives. Full end-to-end loop simulated: round 1 malformed JSON → nudge → round 2 real `search_products` call → round 3 clean final answer, matching the recovery observed live. Regression-checked against BUG-011 (fabricated-claim guard still fires correctly) and BUG-008 (genuine empty-content nudge still fires correctly). Worst case also verified: if the model emits the malformed pattern on every round, including the forced final call, the existing hard fallback fires and no raw JSON ever reaches the customer.
+- **Status**: Fixed and verified.
+
 ---
 
 ## Open, not yet fixed
@@ -187,3 +202,11 @@ These are deliberate scope boundaries, not defects — tracked so they're not re
 - **Why it's not fixed alongside BUG-009 or BUG-010**: fixing either direction means real hybrid search — a Qdrant payload filter alongside the vector search, or post-filtering/re-ranking structured results against the query text — which is a feature addition, not a validation or gating fix. Bundling it into either bug would have expanded their scope past what could be verified in isolation.
 - **Examples**: "waterproof tents under $200" with no category match won't actually enforce the $200 ceiling. "Find the Trailhead Waterproof Hiking Boot" with category correctly resolved to "Hiking Boots" returns the whole category instead of the one named product.
 - **Revisit**: worth prioritizing once there's a concrete case (like Test 2) where the imprecision visibly affects a real customer-facing outcome, rather than fixing preemptively.
+
+## LIMITATION-002 — No de-duplication for repeated identical tool calls within one turn
+
+- **Noted**: Day 9, while verifying the conversation-memory mechanism
+- **What it is**: `run_agent()`'s loop has no check for the model calling the exact same tool with the exact same arguments across multiple rounds within one turn. Surfaced via a test mock that (artificially) kept requesting `add_to_cart` every round — the loop executed it 4 times before hitting `MAX_TOOL_ITERATIONS`, which would have added 4 units to the mock cart instead of 1 for a real repeated call.
+- **Why it's not fixed now**: not yet observed with the real model, only exposed by an imperfect test mock. Fixing pre-emptively for a hypothetical would be scope creep without evidence it happens in practice — consistent with this project's standing discipline of fixing observed, reproduced failures rather than every theoretical one.
+- **What would close it**: a lightweight per-turn de-duplication check — if the same tool name + arguments were already successfully executed earlier in the same turn's trace, skip re-executing and reuse the prior result (or explicitly tell the model it already happened).
+- **Revisit**: if a real live test ever shows the actual model repeating an identical tool call within one turn, this becomes a real bug (likely BUG-012), not just a documented limitation.

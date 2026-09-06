@@ -19,8 +19,10 @@ practice project is modeled on, made concrete and measurable for this build.
       positives
 - [ ] AI-path responses are grounded in live catalog data (price, stock)
       fetched at answer-time, never from the model's own memory
-- [ ] A 10-query test set (built on Day 9) correctly routes each query to the
-      right path and selects the right tool
+- [x] A 10-query test set (built on Day 9, `tests/integration_test_agent.py`)
+      exercises each tool/path and conversation memory across two turns —
+      pass rate depends on live model behavior each run, not a one-time
+      guarantee; re-run after any future change
 
 ## 3. Performance
 

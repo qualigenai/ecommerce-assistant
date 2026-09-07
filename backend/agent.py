@@ -200,6 +200,43 @@ def _call_ollama(messages: List[Dict[str, Any]], use_tools: bool = True) -> Dict
     return r.json()
 
 
+# Day 11 (streaming) — see docs/bug-log.md.
+#
+# TRUST PRINCIPLE: Reliability
+#
+# Business Purpose:
+#     Give BUG-004's actual bottleneck — the long final-answer generation
+#     round, 27-44s measured live on Day 10 — a real fix: perceived
+#     latency drops to time-to-first-token instead of time-to-full-reply,
+#     without touching the model or hardware.
+#
+# Design Decision:
+#     A thin generator over Ollama's NDJSON streaming protocol
+#     (stream: true), yielding each raw chunk as-is. Deliberately kept
+#     separate from _call_ollama() rather than adding a stream flag to
+#     it — the two have different failure/timeout shapes (a stream can
+#     legitimately take a while between chunks; a blocking call can't),
+#     and keeping them separate means run_agent()'s existing,
+#     trust-hardened non-streaming path is never touched by this change.
+#
+# Failure Strategy:
+#     Any error here (connection drop mid-stream, malformed NDJSON line)
+#     propagates to the caller as an exception — run_agent_stream()'s own
+#     try/except at the endpoint level (main.py) is what converts that
+#     into BUG-012's honest customer-facing fallback, same guarantee as
+#     the non-streaming path, not a separate weaker one.
+def _call_ollama_stream(messages: List[Dict[str, Any]], use_tools: bool = True):
+    payload = {"model": MODEL, "messages": messages, "stream": True}
+    if use_tools:
+        payload["tools"] = TOOLS
+    with httpx.stream("POST", f"{OLLAMA_URL}/api/chat", json=payload, timeout=120) as r:
+        r.raise_for_status()
+        for line in r.iter_lines():
+            if not line:
+                continue
+            yield json.loads(line)
+
+
 def _coerce_float(value: Any) -> Any:
     if value is None:
         return None
@@ -899,3 +936,242 @@ def run_agent(user_message: str, db: Session, session_id: str = None) -> Dict[st
     )
     _save(fallback_reply)
     return _package(fallback_reply, trace, MAX_TOOL_ITERATIONS, model_latencies)
+
+
+# Day 11 (streaming) — see docs/bug-log.md.
+#
+# TRUST PRINCIPLE: Governance
+#
+# Business Purpose:
+#     Stream tokens to the customer as they're generated (fixing the
+#     PERCEIVED latency BUG-004 measured), without silently giving up
+#     the two safety guarantees BUG-011 and BUG-013 spent nine bugs'
+#     worth of work building — both work by checking the COMPLETE reply
+#     before it reaches the customer, which naive token-by-token
+#     streaming would bypass entirely.
+#
+# Design Decision:
+#     Stream and buffer simultaneously. Every token is forwarded to the
+#     client the moment it arrives (a "token" event) AND accumulated
+#     server-side into the same complete-text buffer run_agent() already
+#     builds. Once a round's stream ends, the exact same
+#     _looks_like_tool_call_json() and _finalize_reply() checks that
+#     protect the non-streaming path run against that buffer. If either
+#     would have changed what the customer sees, a "correction" event is
+#     sent telling the client to replace the just-streamed text with the
+#     honest version. A terminal "done" event always carries the final,
+#     fully-vetted reply plus the same rounds/model_latency_ms breakdown
+#     as run_agent() — regardless of whether a correction fired.
+#
+# Benefits:
+#     - Time-to-first-token becomes the customer-facing latency number
+#       instead of time-to-full-reply, directly answering BUG-004's
+#       resolution (see docs/bug-log.md) without a larger/GPU-backed model
+#     - The safety guarantee is unchanged, not weakened: a customer can
+#       see a fabrication or malformed blob flash briefly before a
+#       correction replaces it, but they can never be LEFT BELIEVING a
+#       false claim or seeing raw internal JSON as the final state —
+#       which is the actual guarantee BUG-011/BUG-013 make, not
+#       "never visible for a moment"
+#     - Tool-decision rounds cost nothing extra to stream: every real
+#       log from this project shows content is empty exactly when
+#       tool_calls is populated for this model, so streaming every round
+#       uniformly (rather than trying to predict which round is "the
+#       final one" in advance) never leaks partial tool-call reasoning
+#
+# Failure Strategy:
+#     If the model's streaming NDJSON output doesn't match the exact
+#     chunk shape assumed here (e.g. a future Ollama version changes
+#     whether content deltas are incremental vs cumulative), this has
+#     only been verified against mocked chunk sequences, NOT a live
+#     Ollama instance — flagged explicitly for a live smoke test before
+#     trusting this in front of real customers, same posture as every
+#     other live-verification step this project has taken.
+#
+# Future Validation:
+#     Track how often the "correction" event actually fires in
+#     production — if it's frequent, streaming is making fabrications
+#     MORE visible (even if briefly), which would be a signal to
+#     reconsider whether the guard should hold back the LAST token or
+#     two rather than correcting after the fact.
+def _package_stream(reply: str, trace: List[Dict[str, Any]], rounds: int, model_latency_ms: List[float]) -> Dict[str, Any]:
+    return {
+        "reply": reply,
+        "tool_calls": trace,
+        "rounds": rounds,
+        "model_latency_ms": [round(ms, 1) for ms in model_latency_ms],
+        "total_model_latency_ms": round(sum(model_latency_ms), 1),
+    }
+
+
+def _consume_stream(messages: List[Dict[str, Any]], use_tools: bool):
+    """Runs one streaming Ollama call, yielding ('token', text) events as
+    they arrive and returning (full_content, tool_calls, latency_ms) once
+    the stream ends. A thin, testable seam between the raw NDJSON chunks
+    and run_agent_stream()'s round logic."""
+    content_parts: List[str] = []
+    tool_calls: List[Dict[str, Any]] = []
+    t0 = time.monotonic()
+    for chunk in _call_ollama_stream(messages, use_tools=use_tools):
+        chunk_msg = chunk.get("message") or {}
+        delta = chunk_msg.get("content") or ""
+        if delta:
+            content_parts.append(delta)
+            yield ("token", delta)
+        if chunk_msg.get("tool_calls"):
+            tool_calls = chunk_msg["tool_calls"]
+        if chunk.get("done"):
+            break
+    latency_ms = (time.monotonic() - t0) * 1000
+    return "".join(content_parts).strip(), tool_calls, latency_ms
+
+
+def run_agent_stream(user_message: str, db: Session, session_id: str = None):
+    """
+    Streaming counterpart to run_agent() — see its docstring for the
+    multi-round tool-chaining and conversation-memory rationale, both
+    unchanged here. This function only changes HOW the final answer
+    reaches the customer (streamed) and adds the buffer-then-correct
+    step described above; every trust guarantee from BUG-007 through
+    BUG-013 is preserved, not reimplemented differently.
+
+    Yields dicts of shape {"event": ..., "data": ...}:
+      - "token":      {"text": str}               — a content delta
+      - "tool_call":  {tool, success, ...}         — after each tool runs
+      - "correction": {"reply": str}               — replace displayed text
+      - "done":       full _package_stream() dict  — always sent last
+    """
+    history = conversation.get_history(session_id) if session_id else []
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [
+        {"role": "user", "content": user_message},
+    ]
+
+    def _save(reply: str):
+        if session_id:
+            conversation.set_history(session_id, messages[1:] + [{"role": "assistant", "content": reply}])
+
+    trace: List[Dict[str, Any]] = []
+    model_latencies: List[float] = []
+
+    # LIMITATION-004 fix — see docs/bug-log.md.
+    #
+    # TRUST PRINCIPLE: Reliability
+    #
+    # Business Purpose:
+    #     A live smoke test showed the real gap in this design: any round
+    #     where the model is deciding whether to call a tool produces NO
+    #     content at all (the same empty-content-means-tool-call pattern
+    #     documented since Day 8), so the customer sees nothing during
+    #     it — and that round's latency was measured live at 5.5s to
+    #     89.7s across three back-to-back IDENTICAL requests. Streaming
+    #     the eventual answer doesn't help if the customer has already
+    #     been staring at a blank screen for up to a minute and a half
+    #     before any token exists to stream.
+    #
+    # Design Decision:
+    #     Emit an honest "status" event the instant each round begins,
+    #     before the model has produced anything. This does NOT reduce
+    #     real latency — LIMITATION-004 is explicit that this doesn't
+    #     fix the underlying volatility — it only ensures the customer
+    #     is never left with zero feedback during the slowest, least
+    #     predictable part of the request.
+    #
+    # Failure Strategy:
+    #     Purely cosmetic/informational — a client that ignores "status"
+    #     events loses nothing it had before this change.
+    for round_num in range(1, MAX_TOOL_ITERATIONS + 1):
+        status_msg = "Looking that up..." if round_num == 1 else "Still working on it..."
+        yield {"event": "status", "data": {"message": status_msg}}
+
+        content = ""
+        tool_calls: List[Dict[str, Any]] = []
+        gen = _consume_stream(messages, use_tools=True)
+        try:
+            while True:
+                kind, text = next(gen)
+                if kind == "token":
+                    yield {"event": "token", "data": {"text": text}}
+        except StopIteration as stop:
+            content, tool_calls, latency_ms = stop.value
+        model_latencies.append(latency_ms)
+
+        print(
+            f"[AGENT STREAM DEBUG] round={round_num} "
+            f"content={content!r} "
+            f"tool_calls={[tc['function']['name'] for tc in tool_calls]}",
+            flush=True,
+        )
+
+        if not tool_calls:
+            if content and not _looks_like_tool_call_json(content):
+                final_reply = _finalize_reply(content, trace)
+                _save(final_reply)
+                if final_reply != content:
+                    yield {"event": "correction", "data": {"reply": final_reply}}
+                yield {"event": "done", "data": _package_stream(final_reply, trace, round_num, model_latencies)}
+                return
+
+            # BUG-008/BUG-013 nudge path — identical trigger condition to
+            # run_agent()'s non-streaming version. If we already streamed
+            # malformed-looking content live (BUG-013's case), the client
+            # saw it briefly; correct it before retrying.
+            if content:
+                yield {"event": "correction", "data": {"reply": None}}
+            messages.append({"role": "assistant", "content": content, "tool_calls": []})
+            messages.append({
+                "role": "user",
+                "content": (
+                    "You didn't call a tool or provide an answer — or you "
+                    "wrote out a tool call as text instead of actually "
+                    "calling it. Please either use the actual tool-calling "
+                    "mechanism to call a tool, or give the customer a "
+                    "plain-text answer. Do not write JSON in your reply."
+                ),
+            })
+            continue
+
+        messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
+        for tc in tool_calls:
+            name = tc["function"]["name"]
+            arguments = tc["function"]["arguments"]
+            _tool_t0 = time.monotonic()
+            result = _execute_tool(name, arguments, db)
+            tool_latency_ms = (time.monotonic() - _tool_t0) * 1000
+            trace.append({
+                "tool": name, "arguments": arguments,
+                "success": result["success"],
+                "result_count": len(result["results"]),
+                "error": result["error"],
+                "latency_ms": round(tool_latency_ms, 1),
+            })
+            yield {"event": "tool_call", "data": trace[-1]}
+            messages.append({"role": "tool", "content": json.dumps(result)})
+
+    # Iteration cap hit — force a final streamed answer, tools disabled,
+    # same terminal guarantee as run_agent()'s non-streaming hard fallback.
+    yield {"event": "status", "data": {"message": "Finishing up..."}}
+    gen = _consume_stream(messages, use_tools=False)
+    try:
+        while True:
+            kind, text = next(gen)
+            if kind == "token":
+                yield {"event": "token", "data": {"text": text}}
+    except StopIteration as stop:
+        final_content, _, latency_ms = stop.value
+    model_latencies.append(latency_ms)
+
+    if final_content and not _looks_like_tool_call_json(final_content):
+        final_reply = _finalize_reply(final_content, trace)
+        _save(final_reply)
+        if final_reply != final_content:
+            yield {"event": "correction", "data": {"reply": final_reply}}
+        yield {"event": "done", "data": _package_stream(final_reply, trace, MAX_TOOL_ITERATIONS, model_latencies)}
+        return
+
+    fallback_reply = (
+        "I wasn't able to process that request. Could you try "
+        "rephrasing it, or asking in two separate steps?"
+    )
+    _save(fallback_reply)
+    yield {"event": "correction", "data": {"reply": fallback_reply}}
+    yield {"event": "done", "data": _package_stream(fallback_reply, trace, MAX_TOOL_ITERATIONS, model_latencies)}

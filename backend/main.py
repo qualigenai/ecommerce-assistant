@@ -1,8 +1,10 @@
+import json
 import os
 from typing import List, Optional
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from qdrant_client import QdrantClient
 from sqlalchemy.orm import Session
 
@@ -314,6 +316,62 @@ def chat(message: str, session_id: Optional[str] = None, db: Session = Depends(g
         "rounds": result.get("rounds"),
         "model_latency_ms": result.get("model_latency_ms"),
     }
+
+
+# Day 11 (streaming) — see docs/bug-log.md.
+#
+# TRUST PRINCIPLE: Reliability
+#
+# Business Purpose:
+#     Give a customer-facing client a real fix for BUG-004's perceived-
+#     latency problem: tokens as they're generated, instead of a 30-50s
+#     wait for the full reply.
+#
+# Design Decision:
+#     A separate endpoint, not a query param on /chat — the two have
+#     genuinely different response shapes (JSON vs. an SSE event stream)
+#     and different client-side handling, so overloading one endpoint
+#     with a flag would obscure that difference rather than express it.
+#     Delegates all reliability logic to agent.run_agent_stream(), which
+#     preserves BUG-011/BUG-013's complete-text-checked guarantees via
+#     the stream-and-correct pattern documented there — this endpoint's
+#     only job is formatting those events as SSE and applying the same
+#     BUG-012 exception-safety net.
+#
+# Failure Strategy:
+#     Mirrors BUG-012 exactly: any exception raised while iterating the
+#     generator (a dropped connection to Ollama, a malformed NDJSON line)
+#     is caught here and converted into the same honest fallback message
+#     via a "correction" + "done" event pair, rather than leaving the
+#     client's connection hanging or silently closing without an answer.
+#
+# Future Validation:
+#     NOT YET LIVE-VERIFIED — see agent.py's run_agent_stream() docstring.
+#     Unit-tested against mocked Ollama NDJSON chunk sequences (all of
+#     BUG-013's malformed-JSON case, BUG-011's fabrication case, and the
+#     iteration-cap hard-fallback case reproduce correctly), but the
+#     exact chunk shape assumed here has not been confirmed against a
+#     real running Ollama instance. Needs a live smoke test before this
+#     is trusted the way /chat's non-streaming path is.
+@app.post("/chat/stream")
+def chat_stream(message: str, session_id: Optional[str] = None, db: Session = Depends(get_db)):
+    if not session_id:
+        session_id = conversation.new_session_id()
+
+    def event_source():
+        yield f"event: session\ndata: {json.dumps({'session_id': session_id})}\n\n"
+        try:
+            for evt in agent.run_agent_stream(message, db, session_id=session_id):
+                yield f"event: {evt['event']}\ndata: {json.dumps(evt['data'])}\n\n"
+        except Exception as e:
+            # BUG-012 parity — an exception here must resolve to the same
+            # honest fallback /chat already guarantees, not a hung or
+            # silently closed connection.
+            fallback_reply = "I'm sorry, but I couldn't complete that request right now. Please try again."
+            yield f"event: correction\ndata: {json.dumps({'reply': fallback_reply})}\n\n"
+            yield f"event: done\ndata: {json.dumps({'reply': fallback_reply, 'tool_calls': [], 'rounds': None, 'model_latency_ms': None})}\n\n"
+
+    return StreamingResponse(event_source(), media_type="text/event-stream")
 
 
 # ---------- Recommendations (Day 5) ----------

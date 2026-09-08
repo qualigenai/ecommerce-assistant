@@ -6,19 +6,38 @@ practice project is modeled on, made concrete and measurable for this build.
 ## 1. Reliability
 
 - [ ] All services (backend, Qdrant, Ollama, frontend) start cleanly via
-      `docker compose up`
-- [ ] Health-check endpoints (`/health`, `/health/qdrant`, `/health/ollama`)
-      return `ok` before any feature is considered working
-- [ ] The fast filter path never depends on the AI path being available &mdash;
-      structured search keeps working even if the LLM is down
+      `docker compose up` &mdash; **wording doesn't match current
+      architecture**: `docker compose up` starts backend + Qdrant only;
+      Ollama runs natively on the host (verified live, Day 12: reachable
+      and healthy independent of Compose); no frontend exists yet
+      (Day 14+). Left unchecked and unreconciled on purpose until the
+      frontend is actually built, per Day 12 discussion &mdash; rather than
+      quietly reinterpreting the box to make it pass.
+- [x] Health-check endpoints (`/health`, `/health/qdrant`, `/health/ollama`)
+      return `ok` before any feature is considered working &mdash; verified
+      live (Day 12, `reliability_check.py`): all three return `ok`.
+- [x] The fast filter path never depends on the AI path being available &mdash;
+      structured search keeps working even if the LLM is down &mdash; verified
+      live (Day 12): with Ollama deliberately stopped, `/search` still
+      returned correct results in 10.0ms; `/chat` failed *honestly*
+      instead of hanging &mdash; BUG-012's fallback fired at the ~60s httpx
+      timeout, confirming that guarantee under a real failure, not a
+      simulated one.
 
 ## 2. Accuracy
 
-- [ ] Structured filter queries return only products matching the stated
+- [x] Structured filter queries return only products matching the stated
       filters (category, price range, boolean attributes) &mdash; no false
-      positives
-- [ ] AI-path responses are grounded in live catalog data (price, stock)
-      fetched at answer-time, never from the model's own memory
+      positives &mdash; verified live (Day 12, `accuracy_check.py`): four
+      filter combinations checked against every returned product
+      individually, zero violations.
+- [x] AI-path responses are grounded in live catalog data (price, stock)
+      fetched at answer-time, never from the model's own memory &mdash;
+      verified live (Day 12): asked `/chat` for a real product's price
+      and stock, independently fetched the true values via `/search`,
+      and the reply's numbers matched exactly ($89.99, 42). Also
+      confirmed the honest-refusal case: asked about a nonexistent
+      product, got an honest "no product found," not a fabricated price.
 - [x] A 10-query test set (built on Day 9, `tests/integration_test_agent.py`)
       exercises each tool/path and conversation memory across two turns —
       pass rate depends on live model behavior each run, not a one-time

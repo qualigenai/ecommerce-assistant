@@ -73,10 +73,29 @@ practice project is modeled on, made concrete and measurable for this build.
 
 ## 4. Security & code quality
 
-- [ ] No secrets or API keys committed to Git (`.gitignore` covers `.env`)
-- [ ] User input sanitized before being passed to the LLM
-- [ ] Basic rate limiting on AI-path endpoints
-- [ ] Code reviewed (diff-by-diff with Claude Code) before each daily commit
+- [x] No secrets or API keys committed to Git (`.gitignore` covers `.env`) &mdash;
+      verified (Day 13): confirmed `.gitignore` covers `.env`, and checked
+      full git history directly &mdash; nothing secret-looking was ever
+      committed, not just excluded going forward.
+- [x] User input sanitized before being passed to the LLM &mdash; verified
+      live (Day 13, `security_check.py`): empty, whitespace-only, and
+      over-length messages all correctly rejected with 400; a legitimate
+      message still passes through untouched. See `sanitize.py` &mdash;
+      control characters are stripped and length is capped as a hard
+      gate; prompt-injection phrasing is flagged for logging only, not
+      blocked, since a keyword blocklist against a local 3B model isn't
+      a reliable defense and was never claimed to be one.
+- [x] Basic rate limiting on AI-path endpoints &mdash; verified live (Day 13):
+      10 requests/60s per client IP on `/chat` and `/chat/stream`
+      (the only endpoints that cost real inference); confirmed the 11th
+      and 12th rapid requests correctly returned 429 with a `Retry-After`
+      header. See `rate_limit.py` &mdash; in-memory, single-process, resets
+      on restart, same honestly-scoped limitation as `conversation.py`'s
+      session store.
+- [x] Code reviewed (diff-by-diff with Claude Code) before each daily
+      commit &mdash; this describes how every day of this project has
+      actually operated (Days 9&ndash;13's commits were all reviewed as
+      diffs before being applied), not a separate step to schedule.
 
 ## 5. UX
 

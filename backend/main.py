@@ -3,7 +3,7 @@ import os
 from typing import List, Optional
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from qdrant_client import QdrantClient
 from sqlalchemy.orm import Session
@@ -12,7 +12,9 @@ import agent
 import conversation
 import crud
 import embeddings
+import rate_limit
 import routing
+import sanitize
 import schemas
 import telemetry
 import vector_store
@@ -223,7 +225,12 @@ def assistant_search(q: str, db: Session = Depends(get_db)):
 # ---------- Conversational agent (Day 7) ----------
 
 @app.post("/chat")
-def chat(message: str, session_id: Optional[str] = None, db: Session = Depends(get_db)):
+def chat(
+    message: str,
+    session_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _rate_limit=Depends(rate_limit.rate_limit_ai_path),
+):
     """
     Conversational endpoint. Day 9: accepts an optional session_id to
     carry conversation history across turns — see conversation.py and
@@ -231,7 +238,22 @@ def chat(message: str, session_id: Optional[str] = None, db: Session = Depends(g
     given, one is generated and returned; pass it back on the next call
     to continue the same conversation (e.g. "find X" then, separately,
     "add 1 to my cart").
+
+    Day 13 — see docs/bug-log.md and sanitize.py/rate_limit.py. Rate
+    limited (rate_limit.rate_limit_ai_path) and input-sanitized
+    (sanitize.sanitize_chat_message) before reaching the agent — both
+    apply BEFORE the session_id is even resolved, so a rejected request
+    never consumes a session or reaches the model.
     """
+    try:
+        sanitized = sanitize.sanitize_chat_message(message)
+    except sanitize.InputValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    message = sanitized["clean"]
+    if sanitized["injection_signal"]:
+        # Logged, never blocked — see sanitize.py's docstring for why.
+        print(f"[SECURITY] injection-pattern signal on /chat: {message!r}", flush=True)
+
     if not session_id:
         session_id = conversation.new_session_id()
 
@@ -354,7 +376,23 @@ def chat(message: str, session_id: Optional[str] = None, db: Session = Depends(g
 #     real running Ollama instance. Needs a live smoke test before this
 #     is trusted the way /chat's non-streaming path is.
 @app.post("/chat/stream")
-def chat_stream(message: str, session_id: Optional[str] = None, db: Session = Depends(get_db)):
+def chat_stream(
+    message: str,
+    session_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _rate_limit=Depends(rate_limit.rate_limit_ai_path),
+):
+    # Day 13 — same gate as /chat, applied BEFORE the StreamingResponse is
+    # even constructed, so a rejected request gets a normal 400 JSON
+    # response, never a stream that opens and then immediately errors.
+    try:
+        sanitized = sanitize.sanitize_chat_message(message)
+    except sanitize.InputValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    message = sanitized["clean"]
+    if sanitized["injection_signal"]:
+        print(f"[SECURITY] injection-pattern signal on /chat/stream: {message!r}", flush=True)
+
     if not session_id:
         session_id = conversation.new_session_id()
 

@@ -720,21 +720,32 @@ def _finalize_reply(reply: str, trace: List[Dict[str, Any]]) -> str:
 # Design Decision:
 #     Reuses BUG-008's exact nudge-and-continue mechanism rather than
 #     introducing new architecture. Content that looks like an attempted
-#     tool call (starts with '{', mentions "name" and "parameters"/
-#     "arguments") is treated the same way as empty content was already
-#     treated — not a valid final answer, so nudge and retry within the
-#     existing bounded loop.
+#     tool call (contains a JSON-object shape mentioning "name" and
+#     "parameters"/"arguments") is treated the same way as empty content
+#     was already treated — not a valid final answer, so nudge and retry
+#     within the existing bounded loop.
+#
+# BUG-014 fix (Day 14, live frontend testing) — see docs/bug-log.md.
+#     The original version only checked whether the ENTIRE message
+#     started with '{' — real live testing found the model writing a
+#     sentence of plain English FIRST ("It seems like I need to search
+#     for the product again..."), THEN the broken JSON tool-call
+#     attempt. That content doesn't start with '{', so the old check
+#     waved it straight through to the customer. Fixed by searching for
+#     the JSON-object pattern anywhere in the content, via regex,
+#     instead of requiring it at position zero.
 #
 # Benefits:
 #     - Closes a real, observed failure: the model sometimes writes out
-#       a tool call as text (often malformed JSON — missing a colon
-#       after "parameters", for example) instead of issuing a genuine
-#       tool call. Previously this passed every check ("content is
-#       non-empty") and went straight to the customer.
-#     - Deliberately narrow heuristic — requires the JSON-object shape
-#       AND both "name" and a parameters/arguments key, to avoid
-#       false-positiving on a legitimate answer that happens to mention
-#       JSON or start with a brace for unrelated reasons.
+#       a tool call as text (sometimes pure JSON, sometimes prose
+#       followed by JSON) instead of issuing a genuine tool call.
+#       Previously this passed every check ("content is non-empty") and
+#       went straight to the customer.
+#     - The regex requires the JSON-object shape AND both "name" and a
+#       parameters/arguments key together, to avoid false-positiving on
+#       a legitimate answer that happens to mention JSON or braces for
+#       unrelated reasons — a customer discussing a shopping assistant
+#       essentially never legitimately produces this exact shape.
 #
 # Failure Strategy:
 #     If the model keeps producing this pattern every round, the
@@ -747,10 +758,9 @@ def _finalize_reply(reply: str, trace: List[Dict[str, Any]]) -> str:
 #     evidence the model needs a stronger structured-output constraint,
 #     not just this containment layer.
 def _looks_like_tool_call_json(content: str) -> bool:
-    stripped = content.strip()
-    if not stripped.startswith("{"):
+    if "{" not in content:
         return False
-    lowered = stripped.lower()
+    lowered = content.lower()
     return '"name"' in lowered and ("parameters" in lowered or "arguments" in lowered)
 
 
@@ -912,6 +922,12 @@ def run_agent(user_message: str, db: Session, session_id: str = None) -> Dict[st
                 "result_count": len(result["results"]),
                 "error": result["error"],
                 "latency_ms": round(tool_latency_ms, 1),
+                # Day 14 (UI) — see docs/bug-log.md. The actual product
+                # data, not just a count — the frontend renders product
+                # cards from THIS, never by parsing the natural-language
+                # reply text, so a card can never show a price or image
+                # the backend didn't actually return.
+                "results": result["results"],
             })
             messages.append({"role": "tool", "content": json.dumps(result)})
 
@@ -1143,6 +1159,11 @@ def run_agent_stream(user_message: str, db: Session, session_id: str = None):
                 "result_count": len(result["results"]),
                 "error": result["error"],
                 "latency_ms": round(tool_latency_ms, 1),
+                # Day 14 (UI) — see docs/bug-log.md and run_agent()'s
+                # matching comment above. Real product data, not just a
+                # count — this is what the frontend's "tool_call" event
+                # listener actually renders as a product card.
+                "results": result["results"],
             })
             yield {"event": "tool_call", "data": trace[-1]}
             messages.append({"role": "tool", "content": json.dumps(result)})

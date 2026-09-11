@@ -1,10 +1,12 @@
 import json
 import os
+from pathlib import Path
 from typing import List, Optional
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from qdrant_client import QdrantClient
 from sqlalchemy.orm import Session
 
@@ -22,6 +24,31 @@ from database import Base, engine, get_db
 from seed_data import seed_if_empty
 
 app = FastAPI(title="ecommerce-assistant-backend")
+
+# Day 14 (UI) — see docs/bug-log.md.
+#
+# TRUST PRINCIPLE: Reliability
+#
+# Business Purpose:
+#     Serve the frontend from the SAME service as the API — the
+#     deployment decision made explicitly to avoid a second Render
+#     service and the CORS configuration a cross-origin frontend would
+#     otherwise need, following the working two-service pattern already
+#     proven in the RAG System project, simplified to one service since
+#     nothing here requires the isolation that pattern buys.
+#
+# Design Decision:
+#     Path anchored to this file's own location (Path(__file__).parent),
+#     not a relative string — correct regardless of the process's
+#     working directory, which varies between local `uvicorn main:app`
+#     and however the eventual Docker/Render entrypoint invokes it.
+#
+# Failure Strategy:
+#     If frontend/ doesn't exist yet (e.g. before Day 14's frontend
+#     files are added), the /static mount and "/" route below will 404 —
+#     the API itself is unaffected either way, since every existing
+#     endpoint keeps its own path untouched.
+FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
@@ -511,3 +538,21 @@ def recent_telemetry(limit: int = 20, db: Session = Depends(get_db)):
         }
         for r in rows
     ]
+
+
+# ---------- Frontend (Day 14) ----------
+#
+# Registered LAST, after every API route above, so the static mount at
+# "/static" and the catch-all-ish "/" route can never shadow a real API
+# endpoint - FastAPI matches routes in registration order.
+
+@app.get("/")
+def serve_frontend_index():
+    index_path = FRONTEND_DIR / "index.html"
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="Frontend not built yet.")
+    return FileResponse(str(index_path))
+
+
+if (FRONTEND_DIR / "static").exists():
+    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR / "static")), name="static")

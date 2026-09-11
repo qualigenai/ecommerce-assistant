@@ -1,0 +1,214 @@
+/* ---------- Base / Option A visual language ---------- */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Segoe UI', Arial, sans-serif;
+  background: #F7F8FA;
+  color: #1B2A38;
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  height: 60px;
+  background: #FFFFFF;
+  border-bottom: 1px solid #E7EAEE;
+  display: flex;
+  align-items: center;
+  padding: 0 24px;
+  gap: 16px;
+  flex-shrink: 0;
+}
+.logo { font-size: 17px; font-weight: 700; color: #0B2545; }
+.topbar-spacer { flex: 1; }
+.icon-btn {
+  width: 34px; height: 34px; border-radius: 50%;
+  background: #F1F4F7; display: flex; align-items: center; justify-content: center;
+  font-size: 14px; color: #5A6B7A; cursor: pointer;
+}
+
+.body-row {
+  flex: 1;
+  display: flex;
+  min-height: 0; /* allow children to scroll instead of overflowing */
+}
+
+/* ---------- Storefront ---------- */
+.storefront {
+  flex: 1;
+  padding: 28px 32px;
+  overflow-y: auto;
+}
+.eyebrow {
+  font-size: 11.5px; font-weight: 700; letter-spacing: 0.6px;
+  color: #0572CE; text-transform: uppercase; margin-bottom: 6px;
+}
+.hero-title { font-size: 24px; font-weight: 700; color: #0B2545; margin-bottom: 6px; }
+.hero-sub { font-size: 13px; color: #5A6B7A; margin-bottom: 22px; }
+
+.product-grid {
+  display: flex; flex-wrap: wrap; gap: 16px;
+}
+.pcard {
+  width: calc(33.333% - 11px);
+  min-width: 200px;
+  background: #fff; border: 1px solid #EDEFF2; border-radius: 14px;
+  box-shadow: 0 4px 14px rgba(16,30,54,0.05);
+  padding: 16px; display: flex; flex-direction: column;
+}
+.pcard .thumb {
+  height: 92px; border-radius: 10px;
+  background: linear-gradient(135deg,#EAF1F8,#DCE7F1);
+  margin-bottom: 12px; display: flex; align-items: center; justify-content: center;
+  color: #8FA6BC; font-size: 11px;
+}
+.pcard .name { font-size: 13px; font-weight: 600; color: #0B2545; margin-bottom: 6px; }
+.pcard .price-row { display: flex; align-items: center; justify-content: space-between; margin-top: auto; }
+.pcard .price { font-size: 15px; font-weight: 700; color: #0572CE; }
+.pcard .stock { font-size: 10.5px; font-weight: 600; padding: 3px 9px; border-radius: 999px; }
+.pcard .stock.in { background: #E6F6ED; color: #1E8A4C; }
+.pcard .stock.low { background: #FDF0E0; color: #A85B00; }
+.pcard .add-btn {
+  margin-top: 10px; font-size: 11.5px; font-weight: 600;
+  background: #0572CE; color: #fff; border: none; border-radius: 999px;
+  padding: 7px 0; cursor: pointer;
+}
+.pcard .add-btn:hover { background: #045FAD; }
+
+.loading-state, .empty-state, .error-state {
+  color: #7A8996; font-size: 13px; padding: 24px 0;
+}
+.error-state { color: #B4232C; }
+
+/* ---------- Chat panel (docked, desktop default) ---------- */
+.chat-panel {
+  width: 380px; flex-shrink: 0;
+  background: #fff; border-left: 1px solid #EDEFF2;
+  display: flex; flex-direction: column;
+  box-shadow: -8px 0 24px rgba(16,30,54,0.04);
+}
+
+.cw-header {
+  background: linear-gradient(135deg,#0572CE,#0B2545);
+  padding: 16px 18px; display: flex; align-items: center; gap: 11px;
+  flex-shrink: 0;
+}
+.bot-icon {
+  width: 32px; height: 32px; border-radius: 50%;
+  background: rgba(255,255,255,0.18); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 700; flex-shrink: 0;
+}
+.cw-header-text { flex: 1; min-width: 0; }
+.cw-title { font-size: 14px; font-weight: 600; color: #fff; }
+.cw-sub { font-size: 11px; color: rgba(255,255,255,0.75); margin-top: 1px; }
+.cw-close {
+  display: none; /* shown only in mobile overlay mode */
+  background: none; border: none; color: rgba(255,255,255,0.85);
+  font-size: 22px; cursor: pointer; line-height: 1; padding: 4px;
+}
+
+.cw-body {
+  flex: 1; padding: 16px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 11px;
+  background: #FAFBFC;
+}
+.bubble-bot {
+  align-self: flex-start; background: #fff; border: 1px solid #EDEFF2;
+  color: #1B2A38; font-size: 12.5px; padding: 10px 14px;
+  border-radius: 14px 14px 14px 3px; max-width: 85%; line-height: 1.5;
+  box-shadow: 0 1px 3px rgba(16,30,54,0.04);
+  white-space: pre-wrap; word-wrap: break-word;
+}
+.bubble-user {
+  align-self: flex-end; background: #0572CE; color: #fff;
+  font-size: 12.5px; padding: 10px 14px;
+  border-radius: 14px 14px 3px 14px; max-width: 78%;
+  word-wrap: break-word;
+}
+.bubble-status {
+  align-self: flex-start; color: #8A97A3; font-size: 11.5px;
+  font-style: italic; padding: 2px 4px;
+}
+
+.inline-card {
+  background: #fff; border: 1px solid #EDEFF2; border-radius: 14px; padding: 12px;
+  display: flex; gap: 12px; box-shadow: 0 2px 10px rgba(16,30,54,0.06);
+  align-self: flex-start; width: 100%;
+}
+.inline-card .thumb {
+  width: 56px; height: 56px; border-radius: 10px; flex-shrink: 0;
+  background: linear-gradient(135deg,#EAF1F8,#DCE7F1);
+}
+.inline-card .info { flex: 1; min-width: 0; }
+.inline-card .name { font-size: 12px; font-weight: 600; color: #0B2545; }
+.inline-card .price { font-size: 13px; font-weight: 700; color: #0572CE; margin: 3px 0 8px; }
+.inline-card .add-btn {
+  font-size: 11px; font-weight: 600; background: #0572CE; color: #fff;
+  border: none; border-radius: 999px; padding: 6px 15px; cursor: pointer;
+}
+.inline-card .add-btn:hover { background: #045FAD; }
+.inline-card .add-btn:disabled { background: #A9C7E5; cursor: default; }
+
+.cw-error {
+  margin: 0 16px 10px 16px; padding: 8px 12px;
+  background: #FDECEC; border: 1px solid #F3C6C6; border-radius: 8px;
+  color: #B4232C; font-size: 12px;
+}
+
+.cw-input-row {
+  padding: 14px 16px; background: #fff; border-top: 1px solid #EDEFF2;
+  display: flex; gap: 8px; flex-shrink: 0;
+}
+.cw-input {
+  flex: 1; height: 40px; background: #F1F4F7; border: 1px solid transparent;
+  border-radius: 999px; padding: 0 16px; font-size: 12.5px; color: #1B2A38;
+}
+.cw-input:focus { outline: none; border-color: #0572CE; background: #fff; }
+.cw-input:disabled { color: #9AA7B2; }
+.cw-send {
+  width: 40px; height: 40px; border-radius: 50%; background: #0572CE;
+  color: #fff; border: none; display: flex; align-items: center; justify-content: center;
+  font-size: 15px; cursor: pointer; box-shadow: 0 4px 10px rgba(5,114,206,0.3);
+  flex-shrink: 0;
+}
+.cw-send:disabled { background: #A9C7E5; cursor: default; box-shadow: none; }
+
+/* ---------- Floating launcher (mobile only) ---------- */
+.chat-launcher {
+  display: none;
+  position: fixed; bottom: 20px; right: 20px;
+  width: 58px; height: 58px; border-radius: 50%;
+  background: #0572CE; color: #fff; border: none;
+  box-shadow: 0 8px 20px rgba(5,114,206,0.35);
+  font-size: 24px; cursor: pointer; z-index: 50;
+  align-items: center; justify-content: center;
+}
+
+/* ---------- Responsive: simulated mobile viewport ---------- */
+/* Below this width, Option A's docked panel doesn't fit alongside the
+   storefront - it becomes a full-screen overlay triggered by a floating
+   launcher button (borrowing Option C's pattern specifically for this
+   case), rather than trying to force a two-column desktop layout into a
+   narrow screen. */
+@media (max-width: 860px) {
+  .chat-panel {
+    position: fixed;
+    top: 0; right: 0; bottom: 0; left: 0;
+    width: 100%;
+    z-index: 100;
+    transform: translateY(100%);
+    transition: transform 0.25s ease;
+  }
+  .chat-panel.open { transform: translateY(0); }
+  .cw-close { display: block; }
+  .chat-launcher { display: flex; }
+
+  .pcard { width: calc(50% - 8px); }
+}
+
+@media (max-width: 480px) {
+  .pcard { width: 100%; }
+  .storefront { padding: 20px; }
+}

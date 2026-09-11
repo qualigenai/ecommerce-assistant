@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trailhead Outfitters — Shopping Assistant</title>
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+  <div class="topbar">
+    <div class="logo">Trailhead Outfitters</div>
+    <div class="topbar-spacer"></div>
+    <div class="icon-btn" title="Search">&#128269;</div>
+    <div class="icon-btn" title="Cart">&#128722;</div>
+  </div>
+
+  <div class="body-row">
+
+    <main class="storefront">
+      <div class="eyebrow">Catalog</div>
+      <h1 class="hero-title">Hiking Boots</h1>
+      <p class="hero-sub">Ask the assistant for help, or browse below.</p>
+
+      <div id="product-grid" class="product-grid" aria-live="polite">
+        <div class="loading-state">Loading products&hellip;</div>
+      </div>
+    </main>
+
+    <aside class="chat-panel" id="chat-panel">
+      <div class="cw-header">
+        <div class="bot-icon">AI</div>
+        <div class="cw-header-text">
+          <div class="cw-title">Shopping assistant</div>
+          <div class="cw-sub" id="cw-status-line">Ready to help</div>
+        </div>
+        <button class="cw-close" id="chat-close" aria-label="Close chat">&times;</button>
+      </div>
+
+      <div class="cw-body" id="chat-body">
+        <div class="bubble-bot">Hi! Looking for something specific, or just browsing?</div>
+      </div>
+
+      <div class="cw-error" id="chat-error" hidden></div>
+
+      <form class="cw-input-row" id="chat-form">
+        <input
+          type="text"
+          class="cw-input"
+          id="chat-input"
+          placeholder="Ask about a product..."
+          autocomplete="off"
+          maxlength="2000"
+        >
+        <button type="submit" class="cw-send" id="chat-send" aria-label="Send">&#10148;</button>
+      </form>
+    </aside>
+
+  </div>
+
+  <button class="chat-launcher" id="chat-launcher" aria-label="Open chat">
+    <span class="launcher-icon">&#128172;</span>
+  </button>
+
+  <script src="/static/sse_parser.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

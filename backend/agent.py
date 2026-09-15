@@ -758,10 +758,35 @@ def _finalize_reply(reply: str, trace: List[Dict[str, Any]]) -> str:
 #     evidence the model needs a stronger structured-output constraint,
 #     not just this containment layer.
 def _looks_like_tool_call_json(content: str) -> bool:
-    if "{" not in content:
+    stripped = content.strip()
+    if not stripped:
         return False
-    lowered = content.lower()
-    return '"name"' in lowered and ("parameters" in lowered or "arguments" in lowered)
+    lowered = stripped.lower()
+
+    # BUG-013/014: an attempted tool call written as text, anywhere in
+    # the content - the telltale keys of a tool-call attempt.
+    if "{" in stripped and '"name"' in lowered and ("parameters" in lowered or "arguments" in lowered):
+        return True
+
+    # BUG-015 (Day 15, live testing) — see docs/bug-log.md.
+    # A bare/empty JSON blob (e.g. "{}") has NEITHER "name" nor
+    # "parameters"/"arguments", so case 1 above never catches it - and a
+    # customer typing a plain greeting ("Hi") with no clear intent can
+    # apparently prompt the model to emit exactly that. This system's
+    # system prompt never asks for a JSON-formatted reply under any
+    # circumstance, so if the ENTIRE final answer parses as bare JSON,
+    # it is never a valid customer-facing response, regardless of
+    # whether it resembles a tool-call attempt specifically. Restricted
+    # to content starting with '{' or '[' so this can't fire on an
+    # ordinary word or number appearing alone.
+    if stripped.startswith("{") or stripped.startswith("["):
+        try:
+            json.loads(stripped)
+            return True
+        except (ValueError, TypeError):
+            pass
+
+    return False
 
 
 def run_agent(user_message: str, db: Session, session_id: str = None) -> Dict[str, Any]:

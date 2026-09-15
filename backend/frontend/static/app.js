@@ -20,6 +20,7 @@ const chatForm = document.getElementById("chat-form");
 const chatInput = document.getElementById("chat-input");
 const chatSend = document.getElementById("chat-send");
 const chatError = document.getElementById("chat-error");
+const chatCharCount = document.getElementById("chat-char-count");
 const chatPanel = document.getElementById("chat-panel");
 const chatLauncher = document.getElementById("chat-launcher");
 const chatClose = document.getElementById("chat-close");
@@ -285,10 +286,33 @@ chatForm.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = chatInput.value;
   chatInput.value = "";
+  chatCharCount.hidden = true;
   sendMessage(text);
 });
 
 chatLauncher.addEventListener("click", openChatOnMobile);
 chatClose.addEventListener("click", closeChatOnMobile);
+
+// Day 15 — live character counter, deliberately NOT a hard block. An
+// earlier version used the input's maxlength="2000" attribute to match
+// sanitize.py's limit, which silently truncated anything pasted past
+// 2000 chars client-side - meaning the backend's real over-limit
+// rejection (a 400 with an honest error message) could never actually
+// be exercised through the UI. This shows a warning as you approach the
+// limit but never prevents sending, so the real backend behavior is
+// what the customer (and any tester) actually sees.
+const MAX_MESSAGE_LENGTH = 2000;
+const CHAR_COUNT_WARNING_THRESHOLD = 1800;
+
+chatInput.addEventListener("input", () => {
+  const len = chatInput.value.length;
+  if (len < CHAR_COUNT_WARNING_THRESHOLD) {
+    chatCharCount.hidden = true;
+    return;
+  }
+  chatCharCount.hidden = false;
+  chatCharCount.textContent = `${len} / ${MAX_MESSAGE_LENGTH}`;
+  chatCharCount.classList.toggle("over-limit", len > MAX_MESSAGE_LENGTH);
+});
 
 loadProducts();

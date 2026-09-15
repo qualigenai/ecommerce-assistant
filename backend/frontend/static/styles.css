@@ -157,6 +157,11 @@ body {
   color: #B4232C; font-size: 12px;
 }
 
+.cw-char-count {
+  margin: 0 16px 6px 16px; font-size: 10.5px; color: #9AA7B2; text-align: right;
+}
+.cw-char-count.over-limit { color: #B4232C; font-weight: 600; }
+
 .cw-input-row {
   padding: 14px 16px; background: #fff; border-top: 1px solid #EDEFF2;
   display: flex; gap: 8px; flex-shrink: 0;
